@@ -1,0 +1,90 @@
+# Default values for universal-proxy
+
+replicaCount: 2
+
+image:
+  repository: envoyproxy/envoy
+  tag: v1.30-latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+
+podLabels: {}
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+kubernetesClusterDomain: cluster.local
+
+# Optional pod-level security context
+securityContext: {}
+
+# Optional container-level security context
+containerSecurityContext: {}
+
+# HTTP services: each entry becomes a dedicated HTTP listener, cluster, and a K8s Service
+# All Services select the same Deployment pods, but expose different ports via targetPort
+http:
+  services: []
+  # - name: s3-photos
+  #   listenerPort: 18080        # container/listener port for this service
+  #   servicePort: 80            # ClusterIP port for the K8s Service
+  #   upstream:
+  #     host: s3.ap-southeast-2.amazonaws.com
+  #     port: 443
+  #     tls: true
+  #   routing:
+  #     prefixRewrite: "/photos"   # optional; e.g., inject bucket into path
+  #     hostRewrite: ""             # optional; rewrite Host header to this value
+  #   sigv4:
+  #     enabled: true
+  #     serviceName: s3
+  #     region: ap-southeast-2
+  #     useUnsignedPayload: true
+  # - name: dynamodb-orders
+  #   listenerPort: 18081
+  #   servicePort: 80
+  #   upstream:
+  #     host: dynamodb.ap-southeast-2.amazonaws.com
+  #     port: 443
+  #     tls: true
+  #   routing: {}
+  #   sigv4:
+  #     enabled: true
+  #     serviceName: dynamodb
+  #     region: ap-southeast-2
+  #     useUnsignedPayload: false
+
+# TCP services: each entry becomes a dedicated TCP listener, cluster, and a K8s Service
+# Good for RDS, DocDB, Redis, MQ, MSK, etc.
+tcp:
+  services: []
+  # - name: rds-app
+  #   listenerPort: 15432
+  #   servicePort: 5432
+  #   upstream:
+  #     host: mydb.abcxyz.ap-southeast-2.rds.amazonaws.com
+  #     port: 5432
+  #     tls: true
+
+env:
+  # Extra env vars for the Envoy container (e.g., AWS_REGION if needed by SDK sidecars)
+  []
+
+extraVolumeMounts: []
+extraVolumes: []
+
+# Example annotations to enable IRSA on the ServiceAccount
+# serviceAccount:
+#   annotations:
+#     eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/universal-proxy-role

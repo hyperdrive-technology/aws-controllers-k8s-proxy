@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "universal-proxy.fullname" . }}
+  labels:
+    {{- include "universal-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "universal-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "universal-proxy.selectorLabels" . | nindent 8 }}
+        app: {{ include "universal-proxy.name" . }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- $computedSa := (default (include "universal-proxy.fullname" .) .Values.serviceAccount.name) -}}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ $computedSa }}
+      {{- else }}
+      serviceAccountName: {{ default "default" .Values.serviceAccount.name }}
+      {{- end }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: envoy
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["-c", "/etc/envoy/envoy.yaml"]
+        {{- with .Values.containerSecurityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        ports:
+        {{- range $i, $svc := .Values.http.services }}
+        - name: http-{{ $svc.name | trunc 15 | replace "_" "-" }}
+          containerPort: {{ $svc.listenerPort }}
+          protocol: TCP
+        {{- end }}
+        {{- range $i, $svc := .Values.tcp.services }}
+        - name: tcp-{{ $svc.name | trunc 15 | replace "_" "-" }}
+          containerPort: {{ $svc.listenerPort }}
+          protocol: TCP
+        {{- end }}
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        env:
+        {{- with .Values.env }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        readinessProbe:
+          tcpSocket:
+            {{- if gt (len .Values.http.services) 0 }}
+            port: {{ (index .Values.http.services 0).listenerPort }}
+            {{- else if gt (len .Values.tcp.services) 0 }}
+            port: {{ (index .Values.tcp.services 0).listenerPort }}
+            {{- else }}
+            port: 1
+            {{- end }}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: {{ include "universal-proxy.fullname" . }}
+      {{- with .Values.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
