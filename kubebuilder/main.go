@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/yaml"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -48,14 +47,11 @@ func loadConfig() Config {
 }
 
 func main() {
-	var metricsAddr string
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.Parse()
 
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: runtime.NewScheme(),
-		MetricsBindAddress: metricsAddr,
 	})
 	if err != nil {
 		panic(err)
@@ -77,8 +73,7 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) Setup(mgr ctrl.Manager) error {
-	// Watch a timer source by using a Periodic enqueue in Start()
-	// For simplicity here, we run a background loop to reconcile periodically.
+	// Periodic reconcile loop
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -89,7 +84,6 @@ func (r *Reconciler) Setup(mgr ctrl.Manager) error {
 			}
 		}
 	}()
-	// Create a no-op controller to satisfy Manager requirements
 	_, err := controller.New("noop", mgr, controller.Options{Reconciler: r})
 	return err
 }
