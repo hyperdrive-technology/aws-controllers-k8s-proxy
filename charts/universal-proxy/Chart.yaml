@@ -1,0 +1,6 @@
+apiVersion: v2
+name: universal-proxy
+version: 0.1.0
+description: A universal Envoy proxy that fronts multiple ACK-managed backends using per-service listeners and per-service Kubernetes Services.
+type: application
+appVersion: "1.30"

@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: universal-proxy-controller
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: universal-proxy-controller
+  template:
+    metadata:
+      labels:
+        app: universal-proxy-controller
+    spec:
+      serviceAccountName: universal-proxy-controller
+      containers:
+      - name: manager
+        image: universal-proxy-controller:dev
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONFIGMAP_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CONFIGMAP_NAME
+          value: up-universal-proxy
+        - name: DEPLOYMENT_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DEPLOYMENT_NAME
+          value: up-universal-proxy

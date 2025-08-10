@@ -1,0 +1,7 @@
+# Common Helm ignores
+.git/
+.gitignore
+.DS_Store
+*.tgz
+*.swp
+*~

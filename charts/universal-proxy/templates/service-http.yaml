@@ -1,0 +1,16 @@
+{{- range $i, $svc := .Values.http.services }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc.name }}
+  labels:
+    {{- include "universal-proxy.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "universal-proxy.selectorLabels" $ | nindent 4 }}
+  ports:
+  - name: http
+    port: {{ $svc.servicePort | default 80 }}
+    targetPort: {{ $svc.listenerPort }}
+---
+{{- end }}
