@@ -14,6 +14,12 @@ spec:
       labels:
         {{- include "universal-proxy.selectorLabels" . | nindent 8 }}
         app: {{ include "universal-proxy.name" . }}
+      annotations:
+        {{- if .Values.configMap.create }}
+        proxy.envoy/config-hash: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- else }}
+        proxy.envoy/config-hash: "external"
+        {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -73,7 +79,7 @@ spec:
       volumes:
       - name: envoy-config
         configMap:
-          name: {{ include "universal-proxy.fullname" . }}
+          name: {{ default (include "universal-proxy.fullname" .) .Values.configMap.name }}
       {{- with .Values.extraVolumes }}
       {{- toYaml . | nindent 6 }}
       {{- end }}

@@ -1,7 +1,8 @@
+{{- if .Values.configMap.create }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "universal-proxy.fullname" . }}
+  name: {{ default (include "universal-proxy.fullname" .) .Values.configMap.name }}
   labels:
     {{- include "universal-proxy.labels" . | nindent 4 }}
 data:
@@ -122,3 +123,4 @@ data:
       access_log_path: /tmp/admin_access.log
       address:
         socket_address: { address: 127.0.0.1, port_value: 9901 }
+{{- end }}

@@ -32,6 +32,12 @@ securityContext: {}
 # Optional container-level security context
 containerSecurityContext: {}
 
+# Control how the Envoy ConfigMap is provided. If create=false, the chart will not
+# create a ConfigMap and will mount the one specified by name.
+configMap:
+  create: true
+  name: ""  # when empty, defaults to the chart fullname
+
 # HTTP services: each entry becomes a dedicated HTTP listener, cluster, and a K8s Service
 # All Services select the same Deployment pods, but expose different ports via targetPort
 http:
