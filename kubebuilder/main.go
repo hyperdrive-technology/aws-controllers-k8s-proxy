@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -17,9 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	syaml "sigs.k8s.io/yaml"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // Config holds target CM/Deployment
@@ -28,6 +29,7 @@ type Config struct {
 	ConfigMapName        string
 	DeploymentNamespace  string
 	DeploymentName       string
+	MetricsBindAddress   string
 }
 
 func getEnv(key, def string) string {
@@ -43,6 +45,7 @@ func loadConfig() Config {
 		ConfigMapName:       getEnv("CONFIGMAP_NAME", "universal-proxy"),
 		DeploymentNamespace: getEnv("DEPLOYMENT_NAMESPACE", "default"),
 		DeploymentName:      getEnv("DEPLOYMENT_NAME", "universal-proxy"),
+		MetricsBindAddress:  getEnv("METRICS_BIND_ADDRESS", "0"), // "0" disables metrics
 	}
 }
 
@@ -50,14 +53,16 @@ func main() {
 	flag.Parse()
 
 	cfg := ctrl.GetConfigOrDie()
+	conf := loadConfig()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: runtime.NewScheme(),
+		Scheme:  runtime.NewScheme(),
+		Metrics: server.Options{BindAddress: conf.MetricsBindAddress},
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	r := &Reconciler{Client: mgr.GetClient(), Config: loadConfig()}
+	r := &Reconciler{Client: mgr.GetClient(), Config: conf}
 	if err := r.Setup(mgr); err != nil {
 		panic(err)
 	}
@@ -104,12 +109,12 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	if err := r.collectEC2(ctx, &tcpRoutes); err != nil { return err }
 
 	// Build envoy.yaml
-	envoyYAML := renderEnvoy(httpRoutes, tcpRoutes)
+	envoyYAML, err := renderEnvoy(httpRoutes, tcpRoutes)
+	if err != nil { return err }
 
 	// Upsert ConfigMap
 	cm := &corev1.ConfigMap{}
 	if err := r.Get(ctx, types.NamespacedName{Name: r.Config.ConfigMapName, Namespace: r.Config.ConfigMapNamespace}, cm); err != nil {
-		// create
 		cm = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: r.Config.ConfigMapName, Namespace: r.Config.ConfigMapNamespace},
 			Data: map[string]string{"envoy.yaml": envoyYAML},
@@ -159,11 +164,10 @@ type TCPService struct {
 
 // Collectors for ACK CRDs using dynamic/unstructured
 func (r *Reconciler) collectS3(ctx context.Context, out *[]HTTPService) error {
-	// GVK: s3.services.k8s.aws/v1alpha1, kind: Bucket
 	gvk := schema.GroupVersionKind{Group: "s3.services.k8s.aws", Version: "v1alpha1", Kind: "Bucket"}
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(gvk)
-	if err := r.List(ctx, list); err != nil { return nil } // ignore if CRD not present
+	if err := r.List(ctx, list); err != nil { return nil }
 	for _, item := range list.Items {
 		name := item.GetName()
 		region := item.GetAnnotations()["proxy.envoy/region"]
@@ -250,37 +254,153 @@ func (r *Reconciler) collectEC2(ctx context.Context, out *[]TCPService) error {
 	return nil
 }
 
-// Render a minimal envoy.yaml using the same structure as the Helm chart
-func renderEnvoy(httpSvcs []HTTPService, tcpSvcs []TCPService) string {
-	var b strings.Builder
-	b.WriteString("static_resources:\n  listeners:\n")
+// Render a minimal envoy.yaml using structured YAML marshalling
+func renderEnvoy(httpSvcs []HTTPService, tcpSvcs []TCPService) (string, error) {
+	listeners := make([]any, 0, len(httpSvcs)+len(tcpSvcs))
+	clusters := make([]any, 0, len(httpSvcs)+len(tcpSvcs))
+
 	for _, s := range httpSvcs {
-		fmt.Fprintf(&b, "  - name: http_%s\n    address:\n      socket_address: { address: 0.0.0.0, port_value: %d }\n    filter_chains:\n    - filters:\n      - name: envoy.filters.network.http_connection_manager\n        typed_config:\n          \"@type\": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager\n          stat_prefix: http_%s\n          route_config:\n            name: route_%s\n            virtual_hosts:\n            - name: vh_%s\n              domains: [\"*\"]\n              routes:\n              - match: { prefix: \"/\" }\n                route:\n                  cluster: http_upstream_%s\n", s.Name, s.ListenerPort, s.Name, s.Name, s.Name, s.Name)
-		if s.PrefixRewrite != "" { fmt.Fprintf(&b, "                  prefix_rewrite: \"%s\"\n", s.PrefixRewrite) }
-		if s.HostRewrite != "" { fmt.Fprintf(&b, "                  host_rewrite_literal: \"%s\"\n", s.HostRewrite) }
-		if s.SigV4 != nil {
-			fmt.Fprintf(&b, "                typed_per_filter_config:\n                  envoy.filters.http.aws_request_signing:\n                    \"@type\": type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigningPerRoute\n                    override_config:\n                      service_name: \"%s\"\n                      region: \"%s\"\n", s.SigV4.Service, s.SigV4.Region)
-			if s.SigV4.UseUnsigned { fmt.Fprintf(&b, "                      use_unsigned_payload: true\n") }
+		route := map[string]any{
+			"match": map[string]any{"prefix": "/"},
+			"route": func() map[string]any {
+				r := map[string]any{"cluster": "http_upstream_" + s.Name}
+				if s.PrefixRewrite != "" { r["prefix_rewrite"] = s.PrefixRewrite }
+				if s.HostRewrite != "" { r["host_rewrite_literal"] = s.HostRewrite }
+				return r
+			}(),
 		}
-		fmt.Fprintf(&b, "          http_filters:\n")
 		if s.SigV4 != nil {
-			fmt.Fprintf(&b, "          - name: envoy.filters.http.aws_request_signing\n            typed_config:\n              \"@type\": type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigning\n              service_name: \"%s\"\n              region: \"%s\"\n", s.SigV4.Service, s.SigV4.Region)
-			if s.SigV4.UseUnsigned { fmt.Fprintf(&b, "              use_unsigned_payload: true\n") }
+			route["typed_per_filter_config"] = map[string]any{
+				"envoy.filters.http.aws_request_signing": map[string]any{
+					"@type": "type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigningPerRoute",
+					"override_config": func() map[string]any {
+						m := map[string]any{"service_name": s.SigV4.Service, "region": s.SigV4.Region}
+						if s.SigV4.UseUnsigned { m["use_unsigned_payload"] = true }
+						return m
+					}(),
+				},
+			}
 		}
-		fmt.Fprintf(&b, "          - name: envoy.filters.http.router\n")
+
+		vh := map[string]any{
+			"name": "vh_" + s.Name,
+			"domains": []any{"*"},
+			"routes": []any{route},
+		}
+
+		l := map[string]any{
+			"name": "http_" + s.Name,
+			"address": map[string]any{"socket_address": map[string]any{"address": "0.0.0.0", "port_value": s.ListenerPort}},
+			"filter_chains": []any{
+				map[string]any{
+					"filters": []any{
+						map[string]any{
+							"name": "envoy.filters.network.http_connection_manager",
+							"typed_config": map[string]any{
+								"@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+								"stat_prefix": "http_" + s.Name,
+								"route_config": map[string]any{
+									"name": "route_" + s.Name,
+									"virtual_hosts": []any{vh},
+								},
+								"http_filters": func() []any {
+									filters := []any{}
+									if s.SigV4 != nil {
+										filters = append(filters, map[string]any{
+											"name": "envoy.filters.http.aws_request_signing",
+											"typed_config": map[string]any{
+												"@type": "type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigning",
+												"service_name": s.SigV4.Service,
+												"region": s.SigV4.Region,
+												"use_unsigned_payload": s.SigV4.UseUnsigned,
+											},
+										})
+									}
+									filters = append(filters, map[string]any{"name": "envoy.filters.http.router"})
+									return filters
+								}(),
+							},
+						},
+					},
+				},
+			},
+		}
+		listeners = append(listeners, l)
+
+		cluster := map[string]any{
+			"name": "http_upstream_" + s.Name,
+			"connect_timeout": "2s",
+			"type": "LOGICAL_DNS",
+			"lb_policy": "ROUND_ROBIN",
+			"load_assignment": map[string]any{
+				"cluster_name": "http_upstream_" + s.Name,
+				"endpoints": []any{
+					map[string]any{"lb_endpoints": []any{map[string]any{"endpoint": map[string]any{"address": map[string]any{"socket_address": map[string]any{"address": s.UpstreamHost, "port_value": s.UpstreamPort}}}}}},
+				},
+			},
+		}
+		if s.TLS {
+			cluster["transport_socket"] = map[string]any{
+				"name": "envoy.transport_sockets.tls",
+				"typed_config": map[string]any{"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext", "sni": s.UpstreamHost},
+			}
+		}
+		clusters = append(clusters, cluster)
 	}
+
 	for _, s := range tcpSvcs {
-		fmt.Fprintf(&b, "  - name: tcp_%s\n    address:\n      socket_address: { address: 0.0.0.0, port_value: %d }\n    filter_chains:\n    - filters:\n      - name: envoy.filters.network.tcp_proxy\n        typed_config:\n          \"@type\": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy\n          stat_prefix: tcp_%s\n          cluster: tcp_upstream_%s\n", s.Name, s.ListenerPort, s.Name, s.Name)
+		l := map[string]any{
+			"name": "tcp_" + s.Name,
+			"address": map[string]any{"socket_address": map[string]any{"address": "0.0.0.0", "port_value": s.ListenerPort}},
+			"filter_chains": []any{
+				map[string]any{
+					"filters": []any{
+						map[string]any{
+							"name": "envoy.filters.network.tcp_proxy",
+							"typed_config": map[string]any{
+								"@type": "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
+								"stat_prefix": "tcp_" + s.Name,
+								"cluster": "tcp_upstream_" + s.Name,
+							},
+						},
+					},
+				},
+			},
+		}
+		listeners = append(listeners, l)
+
+		cluster := map[string]any{
+			"name": "tcp_upstream_" + s.Name,
+			"connect_timeout": "2s",
+			"type": "LOGICAL_DNS",
+			"lb_policy": "ROUND_ROBIN",
+			"load_assignment": map[string]any{
+				"cluster_name": "tcp_upstream_" + s.Name,
+				"endpoints": []any{
+					map[string]any{"lb_endpoints": []any{map[string]any{"endpoint": map[string]any{"address": map[string]any{"socket_address": map[string]any{"address": s.UpstreamHost, "port_value": s.UpstreamPort}}}}}},
+				},
+			},
+		}
+		if s.TLS {
+			cluster["transport_socket"] = map[string]any{
+				"name": "envoy.transport_sockets.tls",
+				"typed_config": map[string]any{"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext", "sni": s.UpstreamHost},
+			}
+		}
+		clusters = append(clusters, cluster)
 	}
-	b.WriteString("  clusters:\n")
-	for _, s := range httpSvcs {
-		fmt.Fprintf(&b, "  - name: http_upstream_%s\n    connect_timeout: 2s\n    type: LOGICAL_DNS\n    lb_policy: ROUND_ROBIN\n    load_assignment:\n      cluster_name: http_upstream_%s\n      endpoints:\n      - lb_endpoints:\n        - endpoint:\n            address:\n              socket_address:\n                address: \"%s\"\n                port_value: %d\n", s.Name, s.Name, s.UpstreamHost, s.UpstreamPort)
-		if s.TLS { fmt.Fprintf(&b, "    transport_socket:\n      name: envoy.transport_sockets.tls\n      typed_config:\n        \"@type\": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext\n        sni: \"%s\"\n", s.UpstreamHost) }
+
+	cfg := map[string]any{
+		"static_resources": map[string]any{
+			"listeners": listeners,
+			"clusters":  clusters,
+		},
+		"admin": map[string]any{
+			"access_log_path": "/tmp/admin_access.log",
+			"address": map[string]any{"socket_address": map[string]any{"address": "127.0.0.1", "port_value": 9901}},
+		},
 	}
-	for _, s := range tcpSvcs {
-		fmt.Fprintf(&b, "  - name: tcp_upstream_%s\n    connect_timeout: 2s\n    type: LOGICAL_DNS\n    lb_policy: ROUND_ROBIN\n    load_assignment:\n      cluster_name: tcp_upstream_%s\n      endpoints:\n      - lb_endpoints:\n        - endpoint:\n            address:\n              socket_address:\n                address: \"%s\"\n                port_value: %d\n", s.Name, s.Name, s.UpstreamHost, s.UpstreamPort)
-		if s.TLS { fmt.Fprintf(&b, "    transport_socket:\n      name: envoy.transport_sockets.tls\n      typed_config:\n        \"@type\": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext\n        sni: \"%s\"\n", s.UpstreamHost) }
-	}
-	b.WriteString("admin:\n  access_log_path: /tmp/admin_access.log\n  address:\n    socket_address: { address: 127.0.0.1, port_value: 9901 }\n")
-	return b.String()
+	out, err := syaml.Marshal(cfg)
+	if err != nil { return "", err }
+	return string(out), nil
 }
